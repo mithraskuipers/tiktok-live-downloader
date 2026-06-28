@@ -1,0 +1,20 @@
+# Secrets / credentials
+cookies.json
+tt_cookies.json
+tt_cookies.txt
+password.txt
+.flask_secret
+
+# User/machine-specific config (auto-created on first run)
+users.txt
+save_location.txt
+
+# Recordings
+recordings/
+*.ts
+*.mp4
+*.flv
+
+# Python
+__pycache__/
+*.pyc

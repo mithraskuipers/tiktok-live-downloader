@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TikTok Live Monitor - Login</title>
+<style>
+  body { font-family: sans-serif; background:#111; color:#eee; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }
+  .box { background:#1b1b1b; padding:2rem; border-radius:8px; width:280px; }
+  input { width:100%; padding:0.6rem; margin:0.5rem 0; box-sizing:border-box; border-radius:4px; border:1px solid #444; background:#222; color:#eee; }
+  button { width:100%; padding:0.6rem; border:none; border-radius:4px; background:#2d7; color:#000; font-weight:bold; cursor:pointer; }
+  .error { color:#f55; min-height:1.2em; }
+  h2 { margin-top:0; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <h2>TikTok Live Monitor</h2>
+    <form method="POST" action="/login">
+      <input type="password" name="password" placeholder="Password" autofocus required>
+      <button type="submit">Log in</button>
+    </form>
+    <div class="error">{{error}}</div>
+  </div>
+</body>
+</html>

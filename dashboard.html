@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TikTok Monitor</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0 }
+  body {
+    background: #0d0d0d;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    background: #111;
+    border-bottom: 1px solid #1f1f1f;
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  header h1 { font-size: 1rem; font-weight: 700; letter-spacing: .1em; color: #f472b6 }
+  #clock { font-size: .82rem; color: #444; font-variant-numeric: tabular-nums }
+  .header-actions { display: flex; align-items: center; gap: 10px }
+
+  .wrap { padding: 28px 24px }
+
+  /* -- Disk bar -- */
+  .disk-bar-wrap {
+    margin-bottom: 22px;
+    background: #0d0d0d;
+    border: 1px solid #1f1f1f;
+    border-radius: 8px;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+  }
+  .disk-label { font-size: .75rem; color: #444; letter-spacing: .05em; text-transform: uppercase; white-space: nowrap }
+  .disk-path  { font-size: .75rem; color: #2a2a2a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px }
+  .disk-track { flex: 1; height: 6px; background: #1a1a1a; border-radius: 3px; overflow: hidden; min-width: 80px }
+  .disk-fill  { height: 100%; border-radius: 3px; background: #9d174d; transition: width .4s ease }
+  .disk-fill.warn { background: #b45309 }
+  .disk-fill.crit { background: #991b1b }
+  .disk-nums  { font-size: .78rem; color: #555; white-space: nowrap; font-variant-numeric: tabular-nums }
+  .disk-nums .free-val { color: #94a3b8 }
+  .disk-nums .free-val.low { color: #f87171 }
+  .disk-pct   { font-size: .78rem; font-weight: 700; min-width: 38px; text-align: right; color: #555; font-variant-numeric: tabular-nums }
+  .disk-pct.warn { color: #fb923c }
+  .disk-pct.crit { color: #f87171 }
+
+  /* -- Add bar -- */
+  .add-bar { display: flex; gap: 10px; margin-bottom: 24px; align-items: center }
+  .add-bar input {
+    background: #111;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: .88rem;
+    padding: 7px 14px;
+    outline: none;
+    width: 240px;
+    transition: border-color .15s;
+  }
+  .add-bar input:focus { border-color: #f472b6 }
+  .add-bar input::placeholder { color: #333 }
+  .btn-add {
+    background: #9d174d;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 7px 18px;
+    font-size: .82rem;
+    font-weight: 700;
+    cursor: pointer;
+    letter-spacing: .04em;
+    transition: filter .15s;
+  }
+  .btn-add:hover  { filter: brightness(1.2) }
+  .btn-add:active { filter: brightness(.85) }
+  #add-msg { font-size: .8rem; min-width: 160px }
+  .msg-ok  { color: #4ade80 }
+  .msg-err { color: #f87171 }
+
+  /* -- Table -- */
+  table { width: 100%; border-collapse: collapse; font-size: .9rem }
+  th {
+    text-align: left;
+    padding: 8px 14px;
+    color: #444;
+    font-weight: 500;
+    font-size: .78rem;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    border-bottom: 1px solid #1f1f1f;
+    white-space: nowrap;
+  }
+  td { padding: 11px 14px; border-bottom: 1px solid #161616; vertical-align: middle }
+  tr:hover td { background: #111 }
+  .user-name { font-weight: 600; color: #f0f0f0 }
+  .user-name-link { cursor: pointer; color: inherit; text-decoration: none }
+  .user-name-link:hover  { color: #f472b6 }
+  .user-name-link:active { color: #ec4899 }
+
+  /* -- Badges -- */
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 99px;
+    font-size: .75rem;
+    font-weight: 700;
+    letter-spacing: .05em;
+  }
+  .DOWNLOADING { background: #052e16; color: #4ade80 }
+  .CHECKING    { background: #1c1a06; color: #facc15 }
+  .OFFLINE     { background: #1a1a1a; color: #555    }
+  .ERROR       { background: #2d0a0a; color: #f87171 }
+  .PAUSED      { background: #1e0a2e; color: #c084fc }
+  .STARTING    { background: #1f0a1e; color: #f472b6 }
+  .STOPPING    { background: #2d1a00; color: #fb923c }
+  .STOPPED     { background: #1a1a1a; color: #3f3f3f }
+  .dim { color: #444; font-size: .82rem; font-variant-numeric: tabular-nums }
+
+  /* -- Action buttons -- */
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center }
+  .btn {
+    border: none;
+    border-radius: 6px;
+    padding: 5px 13px;
+    font-size: .76rem;
+    font-weight: 700;
+    cursor: pointer;
+    letter-spacing: .04em;
+    transition: filter .15s;
+    white-space: nowrap;
+  }
+  .btn:hover  { filter: brightness(1.2) }
+  .btn:active { filter: brightness(.85) }
+  .btn:disabled { opacity: .35; cursor: not-allowed; filter: none }
+  .btn-pause  { background: #7c3aed; color: #fff }
+  .btn-resume { background: #059669; color: #fff }
+  .btn-stop   { background: #b45309; color: #fff }
+  .btn-remove { background: #7f1d1d; color: #f87171; border: 1px solid #991b1b }
+  .btn-remove:hover { background: #991b1b; color: #fff }
+
+  /* -- Remove confirm -- */
+  .remove-wrap { position: relative; display: inline-block }
+  .confirm-box {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 6px);
+    right: 0;
+    background: #1a1a1a;
+    border: 1px solid #991b1b;
+    border-radius: 8px;
+    padding: 10px 14px;
+    white-space: nowrap;
+    z-index: 100;
+    font-size: .78rem;
+    color: #e0e0e0;
+    box-shadow: 0 4px 20px #000a;
+  }
+  .confirm-box.open { display: block }
+  .confirm-box p { margin-bottom: 8px }
+  .confirm-box .cb-actions { display: flex; gap: 6px }
+  .btn-confirm-yes { background: #991b1b; color: #fff }
+  .btn-confirm-no  { background: #1f2937; color: #e0e0e0 }
+  .remove-blocked-msg { font-size: .75rem; color: #f87171; margin-top: 3px }
+
+  /* -- Summary -- */
+  #summary { margin-top: 20px; font-size: .82rem; color: #444; display: flex; gap: 24px }
+  #summary .stat span { color: #e0e0e0; font-weight: 700 }
+
+  /* -- Header buttons -- */
+  .btn-kill-all {
+    background: #450a0a;
+    color: #f87171;
+    border: 1px solid #7f1d1d;
+    border-radius: 6px;
+    padding: 6px 16px;
+    font-size: .8rem;
+    font-weight: 700;
+    cursor: pointer;
+    letter-spacing: .05em;
+    transition: background .15s, border-color .15s;
+  }
+  .btn-kill-all:hover { background: #7f1d1d; border-color: #dc2626; color: #fff }
+  .btn-logout {
+    background: none;
+    border: 1px solid #2a2a2a;
+    color: #555;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: .8rem;
+    cursor: pointer;
+    transition: color .15s, border-color .15s;
+  }
+  .btn-logout:hover { color: #e0e0e0; border-color: #444 }
+
+  /* -- Shutdown modal -- */
+  #shutdown-modal {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.75);
+    z-index: 220;
+    align-items: center;
+    justify-content: center;
+  }
+  #shutdown-modal.open { display: flex }
+  .modal-box {
+    background: #111;
+    border: 1px solid #7f1d1d;
+    border-radius: 12px;
+    padding: 28px 32px;
+    max-width: 380px;
+    width: 90%;
+    box-shadow: 0 8px 48px #000d;
+  }
+  .modal-box h2 { font-size: .9rem; color: #f87171; letter-spacing: .08em; margin-bottom: 10px }
+  .modal-box p  { font-size: .85rem; color: #888; margin-bottom: 20px; line-height: 1.5 }
+  .modal-actions { display: flex; gap: 10px; justify-content: flex-end }
+  #shutdown-msg {
+    display: none;
+    position: fixed; inset: 0;
+    background: #0d0d0d;
+    z-index: 300;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+    color: #555;
+    letter-spacing: .08em;
+  }
+  #shutdown-msg.open { display: flex }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#9654; TIKTOK MONITOR</h1>
+  <div id="clock"></div>
+  <div class="header-actions">
+    <button class="btn-kill-all" onclick="openShutdownModal()">Shutdown</button>
+    <button class="btn-logout"   onclick="doLogout()">Logout</button>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- Disk usage -->
+  <div class="disk-bar-wrap">
+    <span class="disk-label">Disk</span>
+    <span class="disk-path" id="disk-path">&hellip;</span>
+    <div class="disk-track"><div class="disk-fill" id="disk-fill" style="width:0%"></div></div>
+    <span class="disk-nums" id="disk-nums">&hellip;</span>
+    <span class="disk-pct"  id="disk-pct">&hellip;</span>
+  </div>
+
+  <!-- Add user -->
+  <div class="add-bar">
+    <input id="new-user" type="text" placeholder="TikTok username"
+           onkeydown="if(event.key==='Enter')addUser()">
+    <button class="btn-add" onclick="addUser()">+ Add</button>
+    <span id="add-msg"></span>
+  </div>
+
+  <!-- Main table -->
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Username</th>
+        <th>Status</th>
+        <th>Detail</th>
+        <th>Elapsed</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="tbody">
+      <tr><td colspan="6" class="dim" style="text-align:center;padding:32px 0">Loading&hellip;</td></tr>
+    </tbody>
+  </table>
+
+  <div id="summary"></div>
+</div>
+
+<!-- Shutdown confirm modal -->
+<div id="shutdown-modal">
+  <div class="modal-box">
+    <h2>&#9209; Shutdown monitor?</h2>
+    <p>All workers will be stopped and downloads cancelled. The web UI will go offline.</p>
+    <div class="modal-actions">
+      <button class="btn btn-confirm-no"  onclick="closeShutdownModal()">Cancel</button>
+      <button class="btn btn-confirm-yes" onclick="doShutdown()">Yes, shut down</button>
+    </div>
+  </div>
+</div>
+
+<!-- Shutdown overlay -->
+<div id="shutdown-msg">Monitor stopped.</div>
+
+<script>
+  const INTERVAL = 3000;
+  let openConfirm = null;
+
+  // -- Clock --
+  (function tick() {
+    const d = new Date();
+    document.getElementById('clock').textContent =
+      d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setTimeout(tick, 1000);
+  })();
+
+  // -- Confirm helpers --
+  function closeAllConfirms() {
+    document.querySelectorAll('.confirm-box.open').forEach(b => b.classList.remove('open'));
+    document.querySelectorAll('.remove-blocked-msg').forEach(b => b.style.display = 'none');
+    openConfirm = null;
+  }
+
+  function openRemoveConfirm(user, blocked) {
+    closeAllConfirms();
+    if (blocked) {
+      const bm = document.getElementById('blocked-' + user);
+      if (bm) { bm.style.display = 'block'; setTimeout(() => bm.style.display='none', 2500); }
+      return;
+    }
+    const box = document.getElementById('confirm-' + user);
+    if (box) { box.classList.add('open'); openConfirm = user; }
+  }
+
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.remove-wrap')) closeAllConfirms();
+  });
+
+  // -- Load status --
+  async function load() {
+    try {
+      const r    = await fetch('/api/status');
+      const data = await r.json();
+      const tb   = document.getElementById('tbody');
+      const prevOpen = openConfirm;
+      closeAllConfirms();
+      tb.innerHTML = '';
+
+      let dl = 0, pa = 0;
+      const removable = st => st === 'PAUSED';
+
+      data.forEach((m, i) => {
+        if (m.status === 'DOWNLOADING') dl++;
+        if (m.status === 'PAUSED')      pa++;
+        const paused    = m.status === 'PAUSED';
+        const isDling   = m.status === 'DOWNLOADING';
+        const canRemove = removable(m.status);
+
+        // Detail / countdown cell
+        let detailCell = m.since || '&mdash;';
+        if (m.status === 'OFFLINE' && m.next_check_in != null) {
+          const secs = m.next_check_in;
+          if (secs <= 0) {
+            detailCell = '<span style="color:#facc15">checking soon&hellip;</span>';
+          } else {
+            const mm = Math.floor(secs / 60), ss = secs % 60;
+            const label = mm > 0 ? `${mm}m ${String(ss).padStart(2,'0')}s` : `${ss}s`;
+            detailCell = `<span style="color:#555">next check in <span style="color:#94a3b8;font-variant-numeric:tabular-nums">${label}</span></span>`;
+          }
+        } else if (m.status === 'DOWNLOADING' && m.since) {
+          detailCell = `<span style="color:#4ade80;font-size:.78rem">${m.since}</span>`;
+        }
+
+        tb.innerHTML += `<tr>
+          <td class="dim">${i + 1}</td>
+          <td class="user-name">
+            <a class="user-name-link"
+               href="https://www.tiktok.com/@${m.user}/live"
+               target="_blank"
+               onclick="event.preventDefault();openLive('${m.user}')"
+               title="Open @${m.user}'s live">@${m.user}</a>
+          </td>
+          <td><span class="badge ${m.status}">${m.status}</span></td>
+          <td class="dim">${detailCell}</td>
+          <td class="dim">${m.elapsed}</td>
+          <td>
+            <div class="actions">
+              <button class="btn ${paused ? 'btn-resume' : 'btn-pause'}"
+                      onclick="togglePause('${m.user}')"
+                      title="${paused ? 'Resume monitoring' : 'Pause monitoring'}">
+                ${paused ? 'Resume' : 'Pause'}
+              </button>
+              ${isDling ? `<button class="btn btn-stop"
+                      onclick="stopDownload('${m.user}')"
+                      title="Stop current download (monitoring continues)">
+                Stop DL
+              </button>` : ''}
+              <div class="remove-wrap">
+                <button class="btn btn-remove"
+                        onclick="openRemoveConfirm('${m.user}', ${!canRemove})"
+                        title="${canRemove ? 'Remove user' : 'Pause first, then remove'}"
+                        ${!canRemove ? 'style="opacity:.4;cursor:not-allowed"' : ''}>
+                  Remove
+                </button>
+                <div id="blocked-${m.user}" class="remove-blocked-msg" style="display:none">
+                  &#9208; Pause first, then remove
+                </div>
+                <div id="confirm-${m.user}" class="confirm-box">
+                  <p>Remove <strong>@${m.user}</strong>?<br>
+                  <span style="color:#666;font-size:.75rem">Worker will be stopped &amp; removed from users.txt</span></p>
+                  <div class="cb-actions">
+                    <button class="btn btn-confirm-yes" onclick="confirmRemove('${m.user}')">Yes, remove</button>
+                    <button class="btn btn-confirm-no"  onclick="closeAllConfirms()">Cancel</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>`;
+      });
+
+      if (prevOpen) {
+        const box = document.getElementById('confirm-' + prevOpen);
+        if (box) { box.classList.add('open'); openConfirm = prevOpen; }
+      }
+
+      const total = data.length;
+      document.getElementById('summary').innerHTML =
+        `<div class="stat">Total <span>${total}</span></div>
+         <div class="stat">Recording <span>${dl}</span></div>
+         <div class="stat">Paused <span>${pa}</span></div>
+         <div class="stat">Idle <span>${total - dl - pa}</span></div>`;
+
+    } catch(e) {
+      console.error('Failed to fetch status', e);
+    }
+  }
+
+  // -- Actions --
+  async function togglePause(user) {
+    await fetch('/api/toggle/' + user, { method: 'POST' });
+    load();
+  }
+
+  async function stopDownload(user) {
+    await fetch('/api/stop/' + user, { method: 'POST' });
+    load();
+  }
+
+  async function confirmRemove(user) {
+    closeAllConfirms();
+    const resp = await fetch('/api/users/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user })
+    });
+    const j = await resp.json();
+    if (!j.ok) alert(j.error || 'Could not remove user.');
+    load();
+  }
+
+  async function addUser() {
+    const inp  = document.getElementById('new-user');
+    const msg  = document.getElementById('add-msg');
+    const name = inp.value.trim().toLowerCase().replace(/^@/, '');
+    if (!name) return;
+    if (!/^[a-z0-9_.]+$/.test(name)) {
+      msg.className = 'msg-err';
+      msg.textContent = 'Invalid username';
+      return;
+    }
+    msg.className = ''; msg.textContent = 'Adding\u2026';
+    const resp = await fetch('/api/users/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user: name })
+    });
+    const j = await resp.json();
+    if (j.ok) {
+      msg.className = 'msg-ok';
+      msg.textContent = '\u2714 @' + name + ' added';
+      inp.value = '';
+      setTimeout(() => { msg.textContent = '' }, 3000);
+    } else {
+      msg.className = 'msg-err';
+      msg.textContent = j.error || 'Error adding user';
+    }
+    load();
+  }
+
+  function openLive(user) {
+    const w = window.open('https://www.tiktok.com/@' + user + '/live', '_blank');
+    if (w) w.focus();
+  }
+
+  // -- Logout --
+  async function doLogout() {
+    try { await fetch('/logout', { method: 'POST' }); } catch(e) {}
+    window.location.href = '/login';
+  }
+
+  // -- Shutdown --
+  function openShutdownModal()  { document.getElementById('shutdown-modal').classList.add('open') }
+  function closeShutdownModal() { document.getElementById('shutdown-modal').classList.remove('open') }
+  async function doShutdown() {
+    closeShutdownModal();
+    document.getElementById('shutdown-msg').classList.add('open');
+    try { await fetch('/api/shutdown', { method: 'POST' }); } catch(e) {}
+  }
+
+  // -- Disk --
+  async function loadDisk() {
+    try {
+      const r = await fetch('/api/disk');
+      const d = await r.json();
+      const path = document.getElementById('disk-path');
+      const fill = document.getElementById('disk-fill');
+      const nums = document.getElementById('disk-nums');
+      const pct  = document.getElementById('disk-pct');
+      if (!d.ok) {
+        path.textContent = d.path || '(unavailable)';
+        nums.textContent = d.error || 'Cannot read disk';
+        fill.style.width = '0%';
+        pct.textContent  = '—';
+        return;
+      }
+      path.textContent = d.path;
+      fill.style.width = d.pct + '%';
+      fill.className   = 'disk-fill' + (d.pct >= 95 ? ' crit' : d.pct >= 80 ? ' warn' : '');
+      pct.textContent  = d.pct + '%';
+      pct.className    = 'disk-pct'  + (d.pct >= 95 ? ' crit' : d.pct >= 80 ? ' warn' : '');
+      const freeEl = document.createElement('span');
+      freeEl.className  = 'free-val' + (d.pct >= 90 ? ' low' : '');
+      freeEl.textContent = d.free + ' free';
+      nums.innerHTML = '';
+      nums.appendChild(freeEl);
+      nums.insertAdjacentText('beforeend', ' \u00b7 ' + d.used + ' used of ' + d.total);
+    } catch(e) {}
+  }
+
+  load();
+  loadDisk();
+  setInterval(load, INTERVAL);
+  setInterval(loadDisk, 60000 * 5);
+</script>
+</body>
+</html>

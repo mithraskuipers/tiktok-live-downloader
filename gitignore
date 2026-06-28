@@ -1,7 +1,0 @@
-*.ts
-*.mp4
-*.flv
-*.json
-*.txt
-__pycache__/
-*.pyc
