@@ -17,6 +17,7 @@ import http.cookiejar
 import tempfile
 import os
 import json
+import re
 import glob
 import argparse
 import time
@@ -27,6 +28,12 @@ from datetime import datetime
 
 BROWSERS = ["chrome", "firefox", "edge", "brave", "chromium", "opera", "vivaldi"]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+LIVE_CHECK_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 def load_cookies_json(cookie_file: str) -> list[str]:
@@ -117,19 +124,87 @@ def try_browser_extraction(cookie_file: str) -> str | None:
     return None
 
 
-def is_live(username: str, cookie_args: list[str]) -> bool:
-    """Check if a TikTok user is currently live."""
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "streamlink",
-             "--url", f"https://www.tiktok.com/@{username}/live"]
-            + cookie_args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=20,
+def _cookie_header_from_args(cookie_args: list[str]) -> str:
+    """Convert streamlink-style ['--http-cookie', 'name=value', ...] pairs
+    into a single 'name=value; name2=value2' Cookie header string."""
+    pairs = []
+    it = iter(cookie_args or [])
+    for a in it:
+        if a == "--http-cookie":
+            try:
+                pairs.append(next(it))
+            except StopIteration:
+                break
+    return "; ".join(pairs)
+
+
+def check_live_status(username: str, cookie_args: list[str] | None = None) -> dict:
+    """
+    Check if a TikTok user is currently live by reading the room status
+    embedded in their live page's SIGI_STATE (or the newer
+    __UNIVERSAL_DATA_FOR_REHYDRATION__) JSON block. This is the same
+    signal TikTok's own frontend uses, so it's far more reliable than
+    asking streamlink to probe the stream.
+
+    Returns a dict with 'is_live', 'status_code', and 'room_id'.
+    Raises on network/parse failure — callers wanting a plain bool
+    should use is_live() below, which swallows errors as False.
+    """
+    url = f"https://www.tiktok.com/@{username}/live"
+    headers = {
+        "User-Agent": LIVE_CHECK_USER_AGENT,
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    cookie_header = _cookie_header_from_args(cookie_args)
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        html = resp.read().decode("utf-8", errors="ignore")
+
+    match = re.search(
+        r'<script id="SIGI_STATE" type="application/json">(.*?)</script>',
+        html, re.DOTALL
+    )
+
+    if match:
+        data = json.loads(match.group(1))
+        room_info = data.get("LiveRoom", {}).get("liveRoomUserInfo", {})
+    else:
+        match = re.search(
+            r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">(.*?)</script>',
+            html, re.DOTALL
         )
-        output = result.stdout.decode(errors="ignore") + result.stderr.decode(errors="ignore")
-        return result.returncode == 0 and "No playable streams" not in output
+        if not match:
+            raise RuntimeError(
+                "Could not find state data in page — TikTok may have changed "
+                "their markup, or served a login wall."
+            )
+        data = json.loads(match.group(1))
+        room_info = (
+            data.get("__DEFAULT_SCOPE__", {})
+                .get("webapp.user-detail", {})
+                .get("userInfo", {})
+        )
+
+    live_room = room_info.get("liveRoom", {})
+    status = live_room.get("status")
+    room_id = live_room.get("roomId") or room_info.get("user", {}).get("roomId")
+
+    return {
+        "username": username,
+        "is_live": status == 2,
+        "status_code": status,
+        "room_id": room_id,
+    }
+
+
+def is_live(username: str, cookie_args: list[str]) -> bool:
+    """Check if a TikTok user is currently live. Returns False on any
+    network/parse error rather than raising, so callers can poll safely."""
+    try:
+        return check_live_status(username, cookie_args)["is_live"]
     except Exception:
         return False
 

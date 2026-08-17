@@ -316,28 +316,35 @@ def _worker_main(user, status_file, pid_file, paused_file, log_file,
     def is_paused():
         return os.path.exists(paused_file)
 
-    # Resolve TikTok cookies the same way the standalone downloader script
-    # does (scan for a cookies .json/.txt next to it). Without this, the
-    # live-check below has no auth and TikTok will never report the user
-    # as live, even though the standalone script (which does load cookies)
-    # detects it instantly.
-    def _load_cookie_args():
+    # Load the downloader script as a module once, so we can reuse its
+    # cookie-loading helpers *and* its check_live_status()/is_live()
+    # HTTP-based check (reads the room status straight out of the TikTok
+    # live page, same as the browser does) instead of duplicating logic.
+    def _load_downloader_module():
         try:
             import importlib.util
-            dl_dir = os.path.dirname(downloader)
-            spec = importlib.util.spec_from_file_location("_tld_cookie_mod", downloader)
+            spec = importlib.util.spec_from_file_location("_tld_mod", downloader)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
+            return mod
+        except Exception:
+            return None
 
-            json_file = mod.find_json_in_project()
+    _dl_mod = _load_downloader_module()
+
+    def _load_cookie_args():
+        if _dl_mod is None:
+            return []
+        try:
+            json_file = _dl_mod.find_json_in_project()
             if json_file:
-                args = mod.load_cookies_json(json_file)
+                args = _dl_mod.load_cookies_json(json_file)
                 if args:
                     return args
 
-            txt_file = os.path.join(dl_dir, "tt_cookies.txt")
+            txt_file = os.path.join(os.path.dirname(downloader), "tt_cookies.txt")
             if os.path.exists(txt_file):
-                args = mod.load_cookies_txt(txt_file)
+                args = _dl_mod.load_cookies_txt(txt_file)
                 if args:
                     return args
         except Exception:
@@ -347,15 +354,10 @@ def _worker_main(user, status_file, pid_file, paused_file, log_file,
     cookie_args = _load_cookie_args()
 
     def is_live():
+        if _dl_mod is None:
+            return False
         try:
-            r = subprocess.run(
-                [sys.executable, "-m", "streamlink",
-                 "--url", f"https://www.tiktok.com/@{user}/live"]
-                + cookie_args,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20
-            )
-            out = r.stdout.decode(errors="ignore") + r.stderr.decode(errors="ignore")
-            return r.returncode == 0 and "No playable streams" not in out
+            return _dl_mod.is_live(user, cookie_args)
         except Exception:
             return False
 
@@ -374,7 +376,7 @@ def _worker_main(user, status_file, pid_file, paused_file, log_file,
         try:
             live = is_live()
         except Exception:
-            set_st("ERROR", "streamlink check failed")
+            set_st("ERROR", "live check failed")
             live = False
 
         if live:
@@ -401,7 +403,6 @@ def _worker_main(user, status_file, pid_file, paused_file, log_file,
             if is_paused():
                 set_st("PAUSED")
                 break
-
 
 def _spawn_worker(user):
     status_file  = os.path.join(status_dir, f"{user}.status")
