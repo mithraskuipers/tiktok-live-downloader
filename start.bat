@@ -78,6 +78,25 @@ if errorlevel 1 (
     echo   [OK] streamlink
 )
 
+:: yt-dlp (used only for --cookies-from-browser extraction; recording
+:: itself works fine without it, so this is a soft check - it installs
+:: if missing but never fails preflight)
+python -c "import yt_dlp" >nul 2>&1
+if errorlevel 1 (
+    echo   [--] yt-dlp not installed - installing...
+    python -m pip install --quiet yt-dlp
+    python -c "import yt_dlp" >nul 2>&1
+    if errorlevel 1 (
+        echo   [!]  yt-dlp install failed - browser cookie extraction won't
+        echo        work, but recording public streams still will. To fix:
+        echo        pip install yt-dlp
+    ) else (
+        echo   [OK] yt-dlp installed
+    )
+) else (
+    echo   [OK] yt-dlp
+)
+
 echo.
 if "%PREFLIGHT_OK%"=="0" (
     echo   Fix the issues above and re-run.

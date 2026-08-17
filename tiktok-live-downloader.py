@@ -101,6 +101,19 @@ def try_browser_extraction(cookie_file: str) -> str | None:
         except subprocess.TimeoutExpired:
             print(f"    [-] {browser} timed out")
             continue
+        except FileNotFoundError:
+            # yt-dlp isn't installed/on PATH. Browser cookie extraction is
+            # impossible without it - stop trying entirely instead of
+            # silently failing once per browser (and, more importantly,
+            # instead of letting this exception escape uncaught and kill
+            # the whole cookie-resolution/record flow, which is what was
+            # previously causing recordings to silently never start).
+            print("    [-] yt-dlp not found on PATH - can't extract cookies "
+                  "from browsers. Install it with: pip install yt-dlp")
+            return None
+        except OSError as e:
+            print(f"    [-] {browser} extraction failed to launch: {e}")
+            continue
 
         if "DPAPI" in result.stderr or "Could not copy" in result.stderr:
             print(f"    [-] {browser} cookie encryption not supported (Chrome 127+ issue)")
@@ -220,7 +233,9 @@ def record(username: str, cookie_args: list[str], output: str) -> None:
 
 
 def resolve_cookies(args) -> list[str]:
-    """Resolve cookie args from all sources. Exits on failure."""
+    """Resolve cookie args from all sources. Exits only if the user
+    explicitly pointed at a cookie file that's missing/empty - otherwise
+    falls back to an empty list (anonymous/no-cookie recording)."""
 
     # 1. Explicit --cookies flag
     if args.cookies:
@@ -259,8 +274,11 @@ def resolve_cookies(args) -> list[str]:
     browser = try_browser_extraction(auto_cookie_file)
 
     if not browser:
-        print("\n[-] Could not extract TikTok cookies automatically.")
-        print("\n    Recommended fix:")
+        print("\n[!] Could not find TikTok cookies anywhere.")
+        print("    Proceeding WITHOUT cookies - this works fine for public")
+        print("    live streams, but may fail for age-restricted/friends-only")
+        print("    streams or if TikTok rate-limits anonymous requests.")
+        print("\n    To use cookies instead:")
         print("    1. Install 'Cookie-Editor' extension in your browser")
         print("    2. Go to tiktok.com while logged in")
         print("    3. Open Cookie-Editor, click Export -> JSON")
@@ -268,7 +286,7 @@ def resolve_cookies(args) -> list[str]:
         print("    5. Re-run this script - it will find it automatically")
         print("\n    Or specify a file directly:")
         print("    python tiktok-live-downloader.py <username> --cookies <file>")
-        sys.exit(1)
+        return []
 
     return load_cookies_txt(auto_cookie_file)
 

@@ -88,6 +88,21 @@ for pkg in flask streamlink; do
     fi
 done
 
+# yt-dlp — used only for --cookies-from-browser extraction. Recording
+# public streams works fine without it, so this is a soft check: it
+# installs if missing but never fails preflight (doesn't touch
+# preflight_ok).
+if python3 -c "import yt_dlp" 2>/dev/null; then
+    printf "  \033[32m[OK]\033[0m yt-dlp\n"
+else
+    printf "  \033[33m[--]\033[0m yt-dlp not found — installing...\n"
+    if python3 -m pip install --quiet yt-dlp; then
+        printf "  \033[32m[OK]\033[0m yt-dlp installed\n"
+    else
+        printf "  \033[33m[!]\033[0m  yt-dlp install failed — browser cookie extraction won't work,\n        but recording public streams still will. To fix: pip install yt-dlp\n"
+    fi
+fi
+
 echo ""
 if [[ "$preflight_ok" != "true" ]]; then
     echo "  Fix the issues above and re-run."
