@@ -57,6 +57,24 @@ py_ver=$(python3 -c "import sys; print(sys.version_info >= (3,8))" 2>/dev/null)
     && _check "$(python3 --version 2>&1)" 1 "" \
     || _check "Python < 3.8 or not found" 0 "Install Python 3.8+ and ensure python3 is in PATH"
 
+# Virtual environment: create if missing, then activate it. Everything below
+# (pip installs, yt-dlp on PATH, ui.py and its workers) runs inside it.
+VENV_DIR="$SCRIPT_DIR/.venv"
+if [[ "$py_ver" == "True" ]]; then
+    if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
+        printf "  \033[33m[--]\033[0m creating virtual environment...\n"
+        if python3 -m venv --clear "$VENV_DIR"; then
+            printf "  \033[32m[OK]\033[0m venv created  (.venv)\n"
+        else
+            _check "venv creation failed" 0 "Install the venv module (Debian/Ubuntu: sudo apt install python3-venv)"
+        fi
+    else
+        printf "  \033[32m[OK]\033[0m venv  (.venv)\n"
+    fi
+    # shellcheck disable=SC1091
+    [[ -f "$VENV_DIR/bin/activate" ]] && source "$VENV_DIR/bin/activate"
+fi
+
 # save_location.txt
 [[ -f "$SAVE_LOCATION_FILE" ]] \
     && _check "save_location.txt exists" 1 "" \

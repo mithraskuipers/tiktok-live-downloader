@@ -46,6 +46,24 @@ if errorlevel 1 (
     for /f "tokens=*" %%v in ('python --version 2^>^&1') do echo   [OK] %%v
 )
 
+:: Virtual environment: create if missing, then activate it. Everything below
+:: (pip installs, yt-dlp on PATH, ui.py and its workers) runs inside it.
+if "%PREFLIGHT_OK%"=="1" (
+    if not exist ".venv\Scripts\activate.bat" (
+        echo   [--] creating virtual environment...
+        python -m venv .venv
+        if errorlevel 1 (
+            echo   [X]  venv creation failed
+            set PREFLIGHT_OK=0
+        ) else (
+            echo   [OK] venv created  .venv
+        )
+    ) else (
+        echo   [OK] venv  .venv
+    )
+    if exist ".venv\Scripts\activate.bat" call ".venv\Scripts\activate.bat"
+)
+
 :: Flask
 python -c "import flask" >nul 2>&1
 if errorlevel 1 (
