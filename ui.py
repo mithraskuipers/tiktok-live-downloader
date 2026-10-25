@@ -334,7 +334,7 @@ def _worker_main(user, status_file, pid_file, paused_file, log_file,
     records when live, writes status files in the cbdaemon convention.
     Cross-platform (Windows + Linux/macOS).
     """
-    import os, sys, time, subprocess
+    import os, sys, time, subprocess, glob
     from datetime import datetime
 
     # Write our own PID so the UI can signal us
@@ -433,11 +433,14 @@ def _worker_main(user, status_file, pid_file, paused_file, log_file,
                 [sys.executable, downloader, user, "--output", out_dir],
                 stdout=lf, stderr=subprocess.STDOUT, **kw
             )
+            print(f"[worker] recording started, downloader pid {proc.pid}", flush=True)
             while proc.poll() is None:
                 if is_paused() or os.path.exists(stop_file):
+                    print("[worker] stop/pause requested, killing downloader", flush=True)
                     kill_tree(proc)
                     break
                 time.sleep(1)
+            print(f"[worker] downloader exited, code {proc.returncode}", flush=True)
         _rm(stop_file)
 
     set_st("STARTING")
@@ -470,7 +473,8 @@ def _worker_main(user, status_file, pid_file, paused_file, log_file,
                 pass
             # A pause/stop kills the downloader before it can convert, so do it here.
             try:
-                if _dl_mod is not None:
+                if _dl_mod is not None and glob.glob(os.path.join(out_dir, "*.flv")):
+                    set_st("STOPPING")   # shown while leftover .flv files are converted
                     _dl_mod.remux_dir(out_dir)
             except Exception:
                 pass

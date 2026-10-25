@@ -222,14 +222,166 @@ def is_live(username: str, cookie_args: list[str]) -> bool:
         return False
 
 
-def record(username: str, cookie_args: list[str], output: str) -> None:
-    print(f"[*] Recording @{username} to {output} - press q to stop")
-    cmd = (
-        [sys.executable, "-m", "streamlink"]
-        + cookie_args
-        + ["--output", output, f"https://www.tiktok.com/@{username}/live", "best"]
-    )
-    subprocess.run(cmd)
+_QUALITY_WEIGHTS = {"ld": 300, "sd": 400, "hd": 500, "hd_60": 600,
+                    "uhd": 700, "uhd_60": 800, "origin": 1000000}
+VERIFY_BYTES = 32768      # output must reach this size to count as a working recording
+VERIFY_SECONDS = 25       # ...within this many seconds
+
+
+def candidate_streams(streams: dict) -> list:
+    """Every video variant TikTok offers, H.264 first (plays everywhere),
+    then HEVC, each group best quality first. Audio-only and aliases skipped."""
+    ranked = []
+    for name, stream in streams.items():
+        codec, _, quality = name.partition("_")
+        weight = _QUALITY_WEIGHTS.get(quality)
+        if weight is not None and quality != "ao":
+            ranked.append((codec == "h264", weight, name, stream))
+    ranked.sort(key=lambda r: (r[0], r[1]), reverse=True)
+    out = [(n, s) for _, _, n, s in ranked]
+    if not out and "best" in streams:
+        out = [("best", streams["best"])]
+    return out
+
+
+def _try_stream(name: str, stream, final: str, ffmpeg: str) -> bool:
+    """Pipe one stream variant through ffmpeg into `final` (fragmented MP4:
+    one file that grows in real time and is playable at every moment, even
+    if the process is killed). Returns True once the recording is confirmed
+    working (output reached VERIFY_BYTES), False if this variant is unusable.
+    """
+    fd = ff = None
+    verified = False
+    total = 0
+    try:
+        fd = stream.open()
+        data = fd.read(65536)
+        if not data:
+            print("[-] Stream opened but sent no data", flush=True)
+            return False
+        print(f"[*] First bytes: {data[:16].hex()} ({'FLV' if data[:3] == b'FLV' else 'NOT FLV'})", flush=True)
+
+        tag = ["-tag:v", "hvc1"] if name.startswith("h265") else []
+        ff = subprocess.Popen(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+             "-fflags", "+discardcorrupt",
+             "-analyzeduration", "2000000", "-probesize", "2000000",
+             "-i", "pipe:0", "-c", "copy"] + tag +
+            ["-flush_packets", "1",
+             "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+             "-f", "mp4", final],
+            stdin=subprocess.PIPE,
+        )
+        started = last_report = time.time()
+        while data:
+            if ff.poll() is not None:
+                print(f"[-] ffmpeg stopped (exit {ff.returncode})", flush=True)
+                break
+            ff.stdin.write(data)
+            ff.stdin.flush()
+            total += len(data)
+            now = time.time()
+            if not verified:
+                if os.path.exists(final) and os.path.getsize(final) >= VERIFY_BYTES:
+                    verified = True
+                    print("[*] Recording confirmed, file is growing", flush=True)
+                elif now - started > VERIFY_SECONDS:
+                    print(f"[-] No usable video after {VERIFY_SECONDS}s", flush=True)
+                    break
+            elif now - last_report >= 10:
+                print(f"[*] {os.path.getsize(final) / 1048576:.1f} MB on disk", flush=True)
+                last_report = now
+            data = fd.read(65536)
+    except Exception as e:
+        print(f"[-] Stream error: {e}", flush=True)
+    finally:
+        if fd is not None:
+            try:
+                fd.close()
+            except Exception:
+                pass
+        if ff is not None:
+            try:
+                ff.stdin.close()
+            except Exception:
+                pass
+            try:
+                ff.wait(timeout=30)
+            except Exception:
+                ff.kill()
+    if not verified and os.path.exists(final):
+        os.remove(final)
+    return verified
+
+
+def _write_raw_flv(stream, final: str) -> bool:
+    """No ffmpeg available: save the stream as-is (.flv), flushed every chunk."""
+    total = 0
+    try:
+        fd = stream.open()
+        data = fd.read(65536)
+        if not data:
+            return False
+        with open(final, "wb") as f:
+            last_sync = time.time()
+            while data:
+                f.write(data)
+                f.flush()
+                total += len(data)
+                if time.time() - last_sync >= 2:
+                    os.fsync(f.fileno())
+                    last_sync = time.time()
+                data = fd.read(65536)
+        fd.close()
+    except Exception as e:
+        print(f"[-] Stream error: {e}", flush=True)
+    return total > 0
+
+
+def record(username: str, cookie_args: list[str], output: str, url: str | None = None) -> str | None:
+    """Record one live session into ONE file that grows while it records.
+
+    Tries each stream variant TikTok offers (H.264 first, then HEVC) until
+    one produces a working recording. Returns the file path, or None.
+    """
+    import streamlink
+
+    url = url or f"https://www.tiktok.com/@{username}/live"
+    session = streamlink.Streamlink()
+    session.set_option("stream-timeout", 30)
+    session.set_option("http-timeout", 20)
+    for kv in (cookie_args[i + 1] for i, a in enumerate(cookie_args) if a == "--http-cookie"):
+        key, _, value = kv.partition("=")
+        session.http.cookies.set(key, value, domain=".tiktok.com")
+
+    print(f"[*] Resolving stream for @{username}...", flush=True)
+    try:
+        streams = session.streams(url)
+    except Exception as e:
+        print(f"[-] Could not resolve stream: {e}", flush=True)
+        return None
+    candidates = candidate_streams(streams or {})
+    if not candidates:
+        print("[-] No playable stream (offline, or TikTok refused the request)", flush=True)
+        return None
+    print(f"[*] Variants: {', '.join(n for n, _ in candidates)}", flush=True)
+
+    base = os.path.splitext(output)[0]
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        print("[!] ffmpeg not found, saving raw .flv (pip install imageio-ffmpeg)", flush=True)
+        final = base + ".flv"
+        print(f"[*] Recording to {final}", flush=True)
+        return final if _write_raw_flv(candidates[0][1], final) else None
+
+    final = base + ".mp4"
+    for name, stream in candidates[:6]:
+        print(f"[*] Trying {name} -> {final}", flush=True)
+        if _try_stream(name, stream, final, ffmpeg):
+            print("[*] Recording ended", flush=True)
+            return final
+    print("[-] No stream variant produced a working recording", flush=True)
+    return None
 
 
 def resolve_cookies(args) -> list[str]:
@@ -348,7 +500,7 @@ def remux_dir(out_dir: str) -> None:
 
 def make_output_path(username: str, out_dir: str) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(out_dir, f"{username}_{timestamp}.flv")
+    return os.path.join(out_dir, f"{username}_{timestamp}.mp4")
 
 
 def main() -> None:
@@ -407,8 +559,9 @@ def main() -> None:
                     print(f"[*] @{username} is live!")
                     output = make_output_path(username, out_dir)
                     print(f"[*] Saving to {output}")
-                    record(username, cookie_args, output)
-                    remux_to_mp4(output)
+                    path = record(username, cookie_args, output)
+                    if path:
+                        remux_to_mp4(path)
                     print(f"[*] Stream ended. Resuming watch in {args.interval}s...")
                 else:
                     print(f"    Not live. Checking again in {args.interval}s...")
@@ -418,8 +571,9 @@ def main() -> None:
     else:
         output = make_output_path(username, out_dir)
         print(f"[*] Saving to {output}")
-        record(username, cookie_args, output)
-        remux_to_mp4(output)
+        path = record(username, cookie_args, output)
+        if path:
+            remux_to_mp4(path)
 
 
 if __name__ == "__main__":
