@@ -167,54 +167,83 @@ def _get_worker_pid(user):
 
 
 def _children_of(pid):
+    # POSIX only. Windows uses taskkill /T instead (wmic is removed from
+    # current Windows 11 builds, which silently broke child discovery).
     try:
-        if os.name == "nt":
-            out = subprocess.check_output(
-                ["wmic", "process", "where", f"ParentProcessId={pid}",
-                 "get", "ProcessId"],
-                text=True, stderr=subprocess.DEVNULL
-            )
-            return [int(l.strip()) for l in out.splitlines()
-                    if l.strip().isdigit()]
-        else:
-            out = subprocess.check_output(
-                ["pgrep", "-P", str(pid)], text=True
-            ).split()
-            return [int(p) for p in out if p.strip()]
+        out = subprocess.check_output(
+            ["pgrep", "-P", str(pid)], text=True,
+            stderr=subprocess.DEVNULL, timeout=5
+        ).split()
+        return [int(p) for p in out if p.strip()]
     except Exception:
         return []
 
 
-def _kill_pid(pid):
+def _descendants(pid):
+    found, stack = [], [pid]
+    while stack:
+        for c in _children_of(stack.pop()):
+            if c not in found:
+                found.append(c)
+                stack.append(c)
+    return found
+
+
+def _kill_tree(pid):
+    """Kill pid and everything under it. On POSIX the tree is snapshotted
+    first, because children get re-parented as soon as their parent dies."""
+    if not pid or pid == os.getpid():
+        return
     try:
         if os.name == "nt":
-            subprocess.call(["taskkill", "/F", "/PID", str(pid)],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.call(["taskkill", "/F", "/T", "/PID", str(pid)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            timeout=10)
         else:
-            os.kill(pid, signal.SIGTERM)
+            victims = _descendants(pid)
+            for p in [pid] + victims:
+                try:
+                    os.kill(p, signal.SIGTERM)
+                except Exception:
+                    pass
     except Exception:
         pass
-
-
-def _kill_worker_children(user):
-    wpid = _get_worker_pid(user)
-    if wpid is None:
-        return
-    for child in _children_of(wpid):
-        _kill_pid(child)
-        for grandchild in _children_of(child):
-            _kill_pid(grandchild)
 
 
 def _worker_alive(user):
     wpid = _get_worker_pid(user)
     if wpid is None:
         return False
+    if os.name == "nt":
+        # os.kill(pid, 0) is not a liveness probe on Windows.
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, wpid)  # QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+        k32.CloseHandle(h)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
+    try:
+        # Reap it if it is our own exited child, so it doesn't look alive as a zombie.
+        if os.waitpid(wpid, os.WNOHANG)[0] == wpid:
+            return False
+    except ChildProcessError:
+        pass
     try:
         os.kill(wpid, 0)
         return True
     except (ProcessLookupError, PermissionError):
         return False
+
+
+def _set_status(user, state):
+    try:
+        with open(os.path.join(status_dir, f"{user}.status"), "w") as f:
+            f.write(f"{state}||{int(time.time())}\n")
+    except Exception:
+        pass
 
 
 def toggle_pause(user):
@@ -228,9 +257,12 @@ def toggle_pause(user):
             pid = _spawn_worker(user)
             with _lock:
                 _worker_pids[user] = pid
+        else:
+            _set_status(user, "STARTING")
     else:
         open(pf, "w").close()
-        _kill_worker_children(user)
+        # The worker sees the flag within ~1s and stops its own recording.
+        _set_status(user, "PAUSED")
 
 
 def elapsed(ts):
@@ -361,13 +393,60 @@ def _worker_main(user, status_file, pid_file, paused_file, log_file,
         except Exception:
             return False
 
+    # "Stop DL" flag lives next to the pause flag
+    stop_file = os.path.join(os.path.dirname(paused_file), f"{user}.stop")
+
+    def _rm(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    def kill_tree(proc):
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=10)
+            else:
+                import signal
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+    def record(out_dir):
+        _rm(stop_file)
+        kw = {} if os.name == "nt" else {"start_new_session": True}
+        with open(log_file, "a") as lf:
+            proc = subprocess.Popen(
+                [sys.executable, downloader, user, "--output", out_dir],
+                stdout=lf, stderr=subprocess.STDOUT, **kw
+            )
+            while proc.poll() is None:
+                if is_paused() or os.path.exists(stop_file):
+                    kill_tree(proc)
+                    break
+                time.sleep(1)
+        _rm(stop_file)
+
     set_st("STARTING")
 
     while True:
         if is_paused():
             set_st("PAUSED")
             while is_paused():
-                time.sleep(5)
+                time.sleep(1)
             set_st("STARTING")
             continue
 
@@ -379,30 +458,28 @@ def _worker_main(user, status_file, pid_file, paused_file, log_file,
             set_st("ERROR", "live check failed")
             live = False
 
-        if live:
+        # Paused while the live check was in flight: don't start recording.
+        if live and not is_paused():
             ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             out_dir = os.path.join(download_dir, user)
             os.makedirs(out_dir, exist_ok=True)
             set_st("DOWNLOADING", ts)
             try:
-                subprocess.run(
-                    [sys.executable, downloader, user, "--output", out_dir],
-                    stdout=open(log_file, "a"), stderr=subprocess.STDOUT
-                )
-            except Exception as e:
+                record(out_dir)
+            except Exception:
                 pass
 
-        # Offline countdown
+        # Offline countdown (1s ticks so pause reacts quickly)
         elapsed = 0
         while elapsed < sleep_interval:
-            next_check = int(time.time()) + (sleep_interval - elapsed)
-            with open(status_file, "w") as f:
-                f.write(f"OFFLINE|{next_check}|{int(time.time())}\n")
-            time.sleep(5)
-            elapsed += 5
             if is_paused():
-                set_st("PAUSED")
                 break
+            if elapsed % 5 == 0:
+                next_check = int(time.time()) + (sleep_interval - elapsed)
+                with open(status_file, "w") as f:
+                    f.write(f"OFFLINE|{next_check}|{int(time.time())}\n")
+            time.sleep(1)
+            elapsed += 1
 
 def _spawn_worker(user):
     status_file  = os.path.join(status_dir, f"{user}.status")
@@ -445,38 +522,20 @@ def _spawn_worker(user):
 
 
 def _kill_worker(user):
-    our_pid = os.getpid()
-
-    def _safe_kill(pid):
-        if pid and pid != our_pid:
-            _kill_pid(pid)
-
     pid_file = os.path.join(pid_dir, f"{user}.pid")
-    wpid = None
-    try:
-        wpid = int(open(pid_file).read().strip())
-    except Exception:
-        pass
+    wpid = _get_worker_pid(user)
 
     with _lock:
         stored_pid = _worker_pids.pop(user, None)
 
-    to_kill = set()
     for root in filter(None, {wpid, stored_pid}):
-        to_kill.add(root)
-        for child in _children_of(root):
-            to_kill.add(child)
-            for grandchild in _children_of(child):
-                to_kill.add(grandchild)
-
-    to_kill.discard(our_pid)
-    for pid in to_kill:
-        _safe_kill(pid)
+        _kill_tree(root)
 
     for path in [
         pid_file,
         os.path.join(status_dir, f"{user}.status"),
         os.path.join(paused_dir, f"{user}.paused"),
+        os.path.join(paused_dir, f"{user}.stop"),
     ]:
         try:
             os.remove(path)
@@ -583,7 +642,10 @@ def api_stop(user):
     with _lock:
         if user not in _users:
             return jsonify({"ok": False, "error": "Unknown user"}), 404
-    _kill_worker_children(user)
+    st, _, _ = get_status(user)
+    if st == "DOWNLOADING":
+        # The worker owns the downloader process and stops it within ~1s.
+        open(os.path.join(paused_dir, f"{user}.stop"), "w").close()
     return jsonify({"ok": True})
 
 
@@ -632,24 +694,8 @@ def api_shutdown():
         current = list(_users)
 
     for u in current:
-        try:
-            _kill_worker_children(u)
-        except Exception:
-            pass
-        try:
-            sf = os.path.join(status_dir, f"{u}.status")
-            with open(sf, "w") as f:
-                f.write("STOPPED||" + str(int(time.time())) + "\n")
-        except Exception:
-            pass
-
-    for u in current:
-        wpid = _get_worker_pid(u)
-        if wpid:
-            try:
-                os.kill(wpid, signal.SIGTERM)
-            except Exception:
-                pass
+        _kill_tree(_get_worker_pid(u))
+        _set_status(u, "STOPPED")
 
     def _do_exit():
         time.sleep(1.2)
