@@ -115,6 +115,23 @@ if errorlevel 1 (
     echo   [OK] yt-dlp
 )
 
+:: imageio-ffmpeg (bundled ffmpeg used to convert recordings .flv to .mp4).
+:: Soft check: without it recordings are kept as .flv.
+python -c "import imageio_ffmpeg" >nul 2>&1
+if errorlevel 1 (
+    echo   [--] imageio-ffmpeg not installed - installing...
+    python -m pip install --quiet imageio-ffmpeg
+    python -c "import imageio_ffmpeg" >nul 2>&1
+    if errorlevel 1 (
+        echo   [!]  imageio-ffmpeg install failed - recordings stay .flv. To fix:
+        echo        pip install imageio-ffmpeg
+    ) else (
+        echo   [OK] imageio-ffmpeg installed
+    )
+) else (
+    echo   [OK] imageio-ffmpeg
+)
+
 echo.
 if "%PREFLIGHT_OK%"=="0" (
     echo   Fix the issues above and re-run.

@@ -121,6 +121,19 @@ else
     fi
 fi
 
+# imageio-ffmpeg — bundled ffmpeg used to convert recordings (.flv -> .mp4).
+# Soft check: without it recordings are kept as .flv.
+if python3 -c "import imageio_ffmpeg" 2>/dev/null; then
+    printf "  \033[32m[OK]\033[0m imageio-ffmpeg\n"
+else
+    printf "  \033[33m[--]\033[0m imageio-ffmpeg not found — installing...\n"
+    if python3 -m pip install --quiet imageio-ffmpeg; then
+        printf "  \033[32m[OK]\033[0m imageio-ffmpeg installed\n"
+    else
+        printf "  \033[33m[!]\033[0m  imageio-ffmpeg install failed — recordings stay .flv. To fix: pip install imageio-ffmpeg\n"
+    fi
+fi
+
 echo ""
 if [[ "$preflight_ok" != "true" ]]; then
     echo "  Fix the issues above and re-run."

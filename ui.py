@@ -468,6 +468,12 @@ def _worker_main(user, status_file, pid_file, paused_file, log_file,
                 record(out_dir)
             except Exception:
                 pass
+            # A pause/stop kills the downloader before it can convert, so do it here.
+            try:
+                if _dl_mod is not None:
+                    _dl_mod.remux_dir(out_dir)
+            except Exception:
+                pass
 
         # Offline countdown (1s ticks so pause reacts quickly)
         elapsed = 0

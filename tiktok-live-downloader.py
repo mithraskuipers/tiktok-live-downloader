@@ -291,6 +291,61 @@ def resolve_cookies(args) -> list[str]:
     return load_cookies_txt(auto_cookie_file)
 
 
+def find_ffmpeg() -> str | None:
+    """System ffmpeg if present, otherwise the binary bundled with the
+    imageio-ffmpeg package (installed into the venv by the launchers)."""
+    import shutil
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def remux_to_mp4(path: str) -> str:
+    """TikTok serves FLV. Remux (no re-encode) the finished recording to a
+    standard MP4 that plays everywhere, then drop the .flv. Falls back to
+    keeping the .flv (still playable in VLC) if ffmpeg is unavailable or
+    fails. Works on partial files, e.g. a recording that was stopped."""
+    if not path.lower().endswith(".flv") or not os.path.exists(path):
+        return path
+    if os.path.getsize(path) == 0:
+        os.remove(path)
+        return path
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        print("[!] ffmpeg not found - keeping .flv (pip install imageio-ffmpeg to auto-convert)")
+        return path
+    out = path[:-4] + ".mp4"
+    tmp = out + ".part"
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-y", "-loglevel", "error", "-fflags", "+discardcorrupt", "-i", path,
+             "-c", "copy", "-movflags", "+faststart", "-f", "mp4", tmp],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        )
+    except OSError as e:
+        print(f"[-] ffmpeg failed to launch: {e} - keeping .flv")
+        return path
+    if r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+        os.replace(tmp, out)
+        os.remove(path)
+        print(f"[*] Converted to {out}")
+        return out
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    print(f"[-] Remux failed, keeping .flv: {(r.stderr or '').strip()[-200:]}")
+    return path
+
+
+def remux_dir(out_dir: str) -> None:
+    for p in sorted(glob.glob(os.path.join(out_dir, "*.flv"))):
+        remux_to_mp4(p)
+
+
 def make_output_path(username: str, out_dir: str) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return os.path.join(out_dir, f"{username}_{timestamp}.flv")
@@ -353,6 +408,7 @@ def main() -> None:
                     output = make_output_path(username, out_dir)
                     print(f"[*] Saving to {output}")
                     record(username, cookie_args, output)
+                    remux_to_mp4(output)
                     print(f"[*] Stream ended. Resuming watch in {args.interval}s...")
                 else:
                     print(f"    Not live. Checking again in {args.interval}s...")
@@ -363,6 +419,7 @@ def main() -> None:
         output = make_output_path(username, out_dir)
         print(f"[*] Saving to {output}")
         record(username, cookie_args, output)
+        remux_to_mp4(output)
 
 
 if __name__ == "__main__":
