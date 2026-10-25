@@ -293,7 +293,7 @@ def resolve_cookies(args) -> list[str]:
 
 def make_output_path(username: str, out_dir: str) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(out_dir, f"{username}_{timestamp}.ts")
+    return os.path.join(out_dir, f"{username}_{timestamp}.flv")
 
 
 def main() -> None:
