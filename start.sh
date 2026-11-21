@@ -57,16 +57,20 @@ py_ver=$(python3 -c "import sys; print(sys.version_info >= (3,8))" 2>/dev/null)
     && _check "$(python3 --version 2>&1)" 1 "" \
     || _check "Python < 3.8 or not found" 0 "Install Python 3.8+ and ensure python3 is in PATH"
 
-# Virtual environment: create if missing, then activate it. Everything below
-# (pip installs, yt-dlp on PATH, ui.py and its workers) runs inside it.
+# Virtual environment: always used. Created if missing (or broken), then
+# every pip install and the app itself run with the venv's own python, so the
+# system (PEP 668 "externally-managed") Python is never touched.
 VENV_DIR="$SCRIPT_DIR/.venv"
+VENV_PY="$VENV_DIR/bin/python"
 if [[ "$py_ver" == "True" ]]; then
-    if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
+    if [[ ! -x "$VENV_PY" ]]; then
         printf "  \033[33m[--]\033[0m creating virtual environment...\n"
-        if python3 -m venv --clear "$VENV_DIR"; then
+        rm -rf "$VENV_DIR"
+        if python3 -m venv "$VENV_DIR" && [[ -x "$VENV_PY" ]]; then
             printf "  \033[32m[OK]\033[0m venv created  (.venv)\n"
         else
-            _check "venv creation failed" 0 "Install the venv module (Debian/Ubuntu: sudo apt install python3-venv)"
+            rm -rf "$VENV_DIR"
+            _check "venv creation failed" 0 "Install the venv module (Debian/Ubuntu: sudo apt install python3-venv python3-full)"
         fi
     else
         printf "  \033[32m[OK]\033[0m venv  (.venv)\n"
@@ -75,30 +79,41 @@ if [[ "$py_ver" == "True" ]]; then
     [[ -f "$VENV_DIR/bin/activate" ]] && source "$VENV_DIR/bin/activate"
 fi
 
-# save_location.txt
-[[ -f "$SAVE_LOCATION_FILE" ]] \
-    && _check "save_location.txt exists" 1 "" \
-    || _check "save_location.txt not found" 0 "Create it with your download folder path on one line"
+# Without a working venv, stop here. Never fall back to system pip.
+if [[ "$preflight_ok" != "true" || ! -x "$VENV_PY" ]]; then
+    echo ""
+    echo "  Fix the issues above and re-run."
+    echo ""
+    exit 1
+fi
 
-# Download dir writable
-if [[ -f "$SAVE_LOCATION_FILE" ]]; then
-    _dl=$(tr -d '[:space:]' < "$SAVE_LOCATION_FILE")
-    if [[ -d "$_dl" ]]; then
-        [[ -r "$_dl" && -w "$_dl" ]] \
-            && _check "Download dir writable  ($_dl)" 1 "" \
-            || _check "Download dir not writable  ($_dl)" 0 "chmod u+rw \"$_dl\""
+# save_location.txt: auto-create (default: ./recordings) if missing.
+# Edit this file to change where recordings are saved.
+if [[ ! -f "$SAVE_LOCATION_FILE" ]]; then
+    echo "$SCRIPT_DIR/recordings" > "$SAVE_LOCATION_FILE"
+    printf "  \033[32m[OK]\033[0m Created save_location.txt  (edit it to change the download folder)\n"
+fi
+
+# Download dir: create if missing, then check it is writable
+_dl=$(head -n 1 "$SAVE_LOCATION_FILE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+if [[ -z "$_dl" ]]; then
+    _check "save_location.txt is empty" 0 "Put your download folder path on the first line"
+else
+    mkdir -p "$_dl" 2>/dev/null
+    if [[ -d "$_dl" && -r "$_dl" && -w "$_dl" ]]; then
+        _check "Download dir writable  ($_dl)" 1 ""
     else
-        _check "Download dir does not exist  ($_dl)" 0 "mkdir -p \"$_dl\""
+        _check "Download dir not usable  ($_dl)" 0 "Fix the path in save_location.txt or: chmod u+rw \"$_dl\""
     fi
 fi
 
 # Python packages — auto-install if missing
 for pkg in flask streamlink; do
-    if python3 -c "import $pkg" 2>/dev/null; then
+    if "$VENV_PY" -c "import $pkg" 2>/dev/null; then
         _check "$pkg" 1 ""
     else
         printf "  \033[33m[--]\033[0m %s not found — installing...\n" "$pkg"
-        if python3 -m pip install --quiet "$pkg"; then
+        if "$VENV_PY" -m pip install --quiet "$pkg"; then
             _check "$pkg installed" 1 ""
         else
             _check "$pkg install failed" 0 "pip install $pkg"
@@ -110,11 +125,11 @@ done
 # public streams works fine without it, so this is a soft check: it
 # installs if missing but never fails preflight (doesn't touch
 # preflight_ok).
-if python3 -c "import yt_dlp" 2>/dev/null; then
+if "$VENV_PY" -c "import yt_dlp" 2>/dev/null; then
     printf "  \033[32m[OK]\033[0m yt-dlp\n"
 else
     printf "  \033[33m[--]\033[0m yt-dlp not found — installing...\n"
-    if python3 -m pip install --quiet yt-dlp; then
+    if "$VENV_PY" -m pip install --quiet yt-dlp; then
         printf "  \033[32m[OK]\033[0m yt-dlp installed\n"
     else
         printf "  \033[33m[!]\033[0m  yt-dlp install failed — browser cookie extraction won't work,\n        but recording public streams still will. To fix: pip install yt-dlp\n"
@@ -123,11 +138,11 @@ fi
 
 # imageio-ffmpeg — bundled ffmpeg used to convert recordings (.flv -> .mp4).
 # Soft check: without it recordings are kept as .flv.
-if python3 -c "import imageio_ffmpeg" 2>/dev/null; then
+if "$VENV_PY" -c "import imageio_ffmpeg" 2>/dev/null; then
     printf "  \033[32m[OK]\033[0m imageio-ffmpeg\n"
 else
     printf "  \033[33m[--]\033[0m imageio-ffmpeg not found — installing...\n"
-    if python3 -m pip install --quiet imageio-ffmpeg; then
+    if "$VENV_PY" -m pip install --quiet imageio-ffmpeg; then
         printf "  \033[32m[OK]\033[0m imageio-ffmpeg installed\n"
     else
         printf "  \033[33m[!]\033[0m  imageio-ffmpeg install failed — recordings stay .flv. To fix: pip install imageio-ffmpeg\n"
@@ -171,4 +186,4 @@ export RUNTIME_DIR SLEEP_INTERVAL
 echo "  Starting..."
 echo ""
 
-exec python3 "$SCRIPT_DIR/ui.py" "$RUNTIME_DIR" "$START_PORT" "${USERS[@]}"
+exec "$VENV_PY" "$SCRIPT_DIR/ui.py" "$RUNTIME_DIR" "$START_PORT" "${USERS[@]}"
