@@ -97,6 +97,18 @@ def _get_secret_key():
     return key
 
 
+def _get_lan_ip():
+    """Best-effort LAN address of this machine (no packets are sent)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip if not ip.startswith("127.") else ""
+    except Exception:
+        return ""
+
+
 def _get_download_dir():
     try:
         return open(SAVE_LOCATION_FILE).read().strip()
@@ -742,5 +754,9 @@ if __name__ == "__main__" and runtime_dir is not None:
     port = find_free_port(start_port)
     if port != start_port:
         print(f"  Port {start_port} in use — using port {port} instead.")
-    print(f"\n  Web UI -> http://localhost:{port}\n")
+    print(f"\n  Web UI -> http://localhost:{port}")
+    _lan = _get_lan_ip()
+    if _lan:
+        print(f"  Network -> http://{_lan}:{port}  (other machines on your LAN)")
+    print("")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
